@@ -1,0 +1,17 @@
+# Node
+node_modules/
+**/node_modules/
+
+# Python
+.venv/
+**/.venv/
+__pycache__/
+*.pyc
+
+# Env / secrets
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
