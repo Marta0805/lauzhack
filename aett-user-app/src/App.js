@@ -161,7 +161,7 @@ function App() {
     } else {
       label = 'Expired';
       bg = '#dc2626';
-    }
+    }l
 
     return (
       <span
