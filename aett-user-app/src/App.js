@@ -13,39 +13,35 @@ function getEmbedMapUrl(origin, destination) {
   return `https://maps.google.com/maps?q=${q}&output=embed`;
 }
 
+// lepo prikazivanje vremena
+function formatTimestamp(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString();
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState('wallet'); // 'wallet' | 'scan'
 
-  // --- Wallet state (form) ---
+  // --- Wallet form state ---
   const [selectedType, setSelectedType] = useState('2h');
   const [selectedZone, setSelectedZone] = useState('AB');
-
-  // free-text addresses
   const [origin, setOrigin] = useState('Bern, Switzerland');
   const [destination, setDestination] = useState('Zürich, Switzerland');
-
   const [personalized, setPersonalized] = useState(false);
   const [personalizedIdInput, setPersonalizedIdInput] = useState('');
 
-  // --- Active ticket ---
-  const [ticket, setTicket] = useState(null);
-  const [ticketType, setTicketType] = useState(null);
-  const [ticketZone, setTicketZone] = useState(null);
-  const [ticketOrigin, setTicketOrigin] = useState(null);
-  const [ticketDestination, setTicketDestination] = useState(null);
-  const [ticketPersonalizedId, setTicketPersonalizedId] = useState(null);
-  const [expiresAt, setExpiresAt] = useState(null);
-  const [firstCheckedAt, setFirstCheckedAt] = useState(null);
-  const [alreadyChecked, setAlreadyChecked] = useState(false);
-
+  // --- Tickets: više karata + istorija (u localStorage) ---
+  const [tickets, setTickets] = useState([]); // [{ token, ticketType, ... }]
+  const [justBought, setJustBought] = useState(false);
   const [buyLoading, setBuyLoading] = useState(false);
   const [buyError, setBuyError] = useState(null);
-  const [justBought, setJustBought] = useState(false);
 
-  // countdown (from expiresAt, controlled by backend)
-  const [remainingSeconds, setRemainingSeconds] = useState(null);
+  // vreme za live countdown
+  const [now, setNow] = useState(Date.now());
 
-  // --- Scan / verify state ---
+  // --- Scan / verify state (za Scan tab) ---
   const [scanRaw, setScanRaw] = useState(null);
   const [scanToken, setScanToken] = useState(null);
   const [scanExpiresAt, setScanExpiresAt] = useState(null);
@@ -61,33 +57,99 @@ function App() {
 
   // ----------------- Effects -----------------
 
-  // flash "✅ Ticket created" for 2 seconds
+  // učitaj istoriju iz localStorage
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('aett_tickets');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setTickets(parsed);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load tickets from localStorage', e);
+    }
+  }, []);
+
+  // upiši istoriju u localStorage kad se promeni
+  useEffect(() => {
+    try {
+      localStorage.setItem('aett_tickets', JSON.stringify(tickets));
+    } catch (e) {
+      console.error('Failed to save tickets to localStorage', e);
+    }
+  }, [tickets]);
+
+  // flash "✅ Ticket created" na 2 sekunde
   useEffect(() => {
     if (!justBought) return;
     const id = setTimeout(() => setJustBought(false), 2000);
     return () => clearTimeout(id);
   }, [justBought]);
 
-  // countdown until expiry (based on expires_at from backend)
+  // globalni "sat" za countdown (osvežava se na 1s)
   useEffect(() => {
-    if (!expiresAt) {
-      setRemainingSeconds(null);
-      return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ----------------- Helpers za vreme / status karte -----------------
+
+  function getTicketStatus(ticket) {
+    if (!ticket.expiresAt) return null;
+    const expiryMs = new Date(ticket.expiresAt).getTime();
+    const diffSec = Math.floor((expiryMs - now) / 1000);
+    if (diffSec <= 0) return 'expired';
+    if (diffSec <= 5 * 60) return 'expiring';
+    return 'active';
+  }
+
+  function formatRemaining(expiresAt) {
+    if (!expiresAt) return '';
+    const expiryMs = new Date(expiresAt).getTime();
+    const diffSec = Math.floor((expiryMs - now) / 1000);
+    if (diffSec <= 0) return '0 min 00 s';
+    const m = Math.floor(diffSec / 60);
+    const s = diffSec % 60;
+    return `${m} min ${s.toString().padStart(2, '0')} s`;
+  }
+
+  function renderStatusPill(ticket) {
+    const status = getTicketStatus(ticket);
+    if (!status) return null;
+
+    let label = '';
+    let bg = '';
+    if (status === 'active') {
+      label = 'Active';
+      bg = '#16a34a';
+    } else if (status === 'expiring') {
+      label = 'Expiring soon';
+      bg = '#f97316';
+    } else {
+      label = 'Expired';
+      bg = '#dc2626';
     }
 
-    const expiryMs = new Date(expiresAt).getTime();
+    return (
+      <span
+        style={{
+          display: 'inline-block',
+          padding: '2px 10px',
+          borderRadius: 999,
+          fontSize: 12,
+          backgroundColor: bg,
+          color: '#fff',
+          marginLeft: 8,
+        }}
+      >
+        {label}
+      </span>
+    );
+  }
 
-    const update = () => {
-      const diff = Math.floor((expiryMs - Date.now()) / 1000);
-      setRemainingSeconds(diff > 0 ? diff : 0);
-    };
-
-    update();
-    const id = setInterval(update, 1000);
-    return () => clearInterval(id);
-  }, [expiresAt]);
-
-  // ----------------- Handlers -----------------
+  // ----------------- Handleri -----------------
 
   async function buyTicket() {
     setBuyLoading(true);
@@ -104,7 +166,6 @@ function App() {
           zone: selectedZone,
           origin,
           destination,
-          // lifetime is decided by backend config
           personalized_id: personalized
             ? (personalizedIdInput.trim() || null)
             : null,
@@ -117,16 +178,21 @@ function App() {
       }
       const data = await resp.json();
 
-      setTicket(data.token);
-      setExpiresAt(data.expires_at);
-      setTicketType(data.ticket_type);
-      setTicketZone(data.zone);
-      setTicketOrigin(data.origin);
-      setTicketDestination(data.destination);
-      setTicketPersonalizedId(data.personalized_id || null);
-      setFirstCheckedAt(data.first_checked_at || null);
-      setAlreadyChecked(Boolean(data.already_checked));
+      const newTicket = {
+        token: data.token,
+        ticketType: data.ticket_type,
+        ticketZone: data.zone,
+        origin: data.origin,
+        destination: data.destination,
+        personalizedId: data.personalized_id || null,
+        expiresAt: data.expires_at,
+        firstCheckedAt: data.first_checked_at || null,
+        alreadyChecked: Boolean(data.already_checked),
+        createdAt: new Date().toISOString(),
+      };
 
+      // najnovija karta ide na vrh
+      setTickets((prev) => [newTicket, ...prev]);
       setJustBought(true);
       setActiveTab('wallet');
     } catch (e) {
@@ -178,6 +244,19 @@ function App() {
       if (data.valid) {
         setScanStatus('valid');
         setScanError(null);
+
+        // ako ova karta postoji u našem wallet-u, ažuriraj istoriju (firstCheckedAt / alreadyChecked)
+        setTickets((prev) =>
+          prev.map((t) =>
+            t.token === token
+              ? {
+                  ...t,
+                  firstCheckedAt: t.firstCheckedAt || data.first_checked_at,
+                  alreadyChecked: t.alreadyChecked || Boolean(data.already_checked),
+                }
+              : t
+          )
+        );
       } else {
         setScanStatus('invalid');
         setScanError(data.reason || 'Ticket invalid.');
@@ -210,17 +289,13 @@ function App() {
     setSelectedZone(e.target.value);
   }
 
+  function handleDeleteTicket(token) {
+    setTickets((prev) => prev.filter((t) => t.token !== token));
+  }
+
   function burnWallet() {
-    setTicket(null);
-    setTicketType(null);
-    setTicketZone(null);
-    setTicketOrigin(null);
-    setTicketDestination(null);
-    setTicketPersonalizedId(null);
-    setExpiresAt(null);
-    setRemainingSeconds(null);
-    setFirstCheckedAt(null);
-    setAlreadyChecked(false);
+    if (!window.confirm('Delete all tickets from this device?')) return;
+    setTickets([]);
   }
 
   function loadDemoQr() {
@@ -241,61 +316,17 @@ function App() {
     setScanError(null);
   }
 
-  // ----------------- Rendering helpers -----------------
-
-  function formatRemaining(sec) {
-    if (sec == null) return '';
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${m} min ${s.toString().padStart(2, '0')} s`;
-  }
-
-  function getTicketStatus() {
-    if (!ticket || remainingSeconds == null) return null;
-    if (remainingSeconds <= 0) return 'expired';
-    if (remainingSeconds <= 5 * 60) return 'expiring';
-    return 'active';
-  }
-
-  function renderStatusPill() {
-    const status = getTicketStatus();
-    if (!status) return null;
-
-    let label = '';
-    let bg = '';
-    if (status === 'active') {
-      label = 'Active';
-      bg = '#16a34a';
-    } else if (status === 'expiring') {
-      label = 'Expiring soon';
-      bg = '#f97316';
-    } else {
-      label = 'Expired';
-      bg = '#dc2626';
-    }
-
-    return (
-      <span
-        style={{
-          display: 'inline-block',
-          padding: '2px 10px',
-          borderRadius: 999,
-          fontSize: 12,
-          backgroundColor: bg,
-          color: '#fff',
-          marginLeft: 8,
-        }}
-      >
-        {label}
-      </span>
-    );
-  }
-
   // ----------------- UI sections -----------------
 
   function renderWallet() {
-    const status = getTicketStatus();
     const embedUrl = getEmbedMapUrl(origin, destination);
+
+    const activeTickets = tickets.filter(
+      (t) => getTicketStatus(t) !== 'expired'
+    );
+    const expiredTickets = tickets.filter(
+      (t) => getTicketStatus(t) === 'expired'
+    );
 
     return (
       <div style={cardStyle}>
@@ -308,9 +339,11 @@ function App() {
           )}
         </h2>
         <p style={{ marginTop: 0, color: '#555' }}>
-          No account, no login — your address→address ticket lives only in this browser tab.
+          No account, no login — your address→address tickets live only in this browser tab
+          (and locally in this device&apos;s history).
         </p>
 
+        {/* Form za novu kartu */}
         <div
           style={{
             display: 'flex',
@@ -379,7 +412,7 @@ function App() {
           </div>
         </div>
 
-        {/* MAP PREVIEW (Google Maps embed, no key) */}
+        {/* MAP PREVIEW */}
         <div style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 13, marginBottom: 4 }}>Route map preview</div>
           {embedUrl ? (
@@ -414,6 +447,7 @@ function App() {
           )}
         </div>
 
+        {/* Personalization */}
         <div
           style={{
             marginBottom: 16,
@@ -455,90 +489,174 @@ function App() {
           <p style={{ color: 'red', marginTop: 8 }}>{buyError}</p>
         )}
 
-        {ticket && (
-          <div style={{ marginTop: 24 }}>
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <h3 style={{ marginRight: 8, marginBottom: 8 }}>Your ticket</h3>
-              {renderStatusPill()}
-            </div>
-
-            <div style={{ marginBottom: 16 }}>
-              <QRCode
-                value={ticket}
-                size={240}
-              />
-            </div>
-
-            <p>
-              <strong>Route:</strong>{' '}
-              {ticketOrigin || '—'} → {ticketDestination || '—'}
-            </p>
-            <p>
-              <strong>Type:</strong> {ticketType || '—'} |{' '}
-              <strong>Zone:</strong> {ticketZone || '—'}
-            </p>
-            <p>
-              <strong>Token:</strong>{' '}
-              <code style={{ wordBreak: 'break-all' }}>{ticket}</code>
-            </p>
-            <p>
-              <strong>Expires at (UTC):</strong> {expiresAt}
-            </p>
-            {remainingSeconds != null && (
-              <p>
-                <strong>Time remaining:</strong>{' '}
-                {status === 'expired'
-                  ? 'Expired'
-                  : formatRemaining(remainingSeconds)}
-              </p>
-            )}
-
-            {ticketPersonalizedId && (
-              <p style={{ fontSize: 13 }}>
-                <strong>Personalized ID:</strong> {ticketPersonalizedId}
-              </p>
-            )}
-
-            {firstCheckedAt && (
-              <p style={{ fontSize: 11, color: '#9ca3af' }}>
-                First checked at: {firstCheckedAt}{' '}
-                {alreadyChecked ? '(re-check)' : '(first time)'}
-              </p>
-            )}
-
-            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              <button
-                onClick={burnWallet}
-                style={{
-                  ...buttonStyle,
-                  backgroundColor: '#374151',
-                }}
-              >
-                Burn wallet
-              </button>
-              <button
-                onClick={() => window.print()}
-                style={{
-                  ...buttonStyle,
-                  backgroundColor: '#16a34a',
-                }}
-              >
-                Print ticket
-              </button>
-            </div>
-
-            <p
+        <div
+          style={{
+            marginTop: 20,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <h3 style={{ margin: 0 }}>My tickets</h3>
+          {tickets.length > 0 && (
+            <button
+              onClick={burnWallet}
               style={{
+                ...buttonStyle,
+                backgroundColor: '#374151',
+                padding: '4px 12px',
                 fontSize: 12,
-                color: '#666',
-                marginTop: 12,
-                maxWidth: 500,
               }}
             >
-              Privacy note: the token and metadata are stored only in this
-              page&apos;s memory. If you refresh and burn the wallet, the ticket
-              disappears from this device.
-            </p>
+              Clear all from this device
+            </button>
+          )}
+        </div>
+
+        {/* ACTIVE TICKETS */}
+        {activeTickets.length === 0 && expiredTickets.length === 0 && (
+          <p style={{ fontSize: 13, color: '#9ca3af', marginTop: 8 }}>
+            No tickets yet. Buy one to get started.
+          </p>
+        )}
+
+        {activeTickets.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <h4 style={{ margin: '8px 0' }}>Active tickets</h4>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {activeTickets.map((t) => (
+                <div
+                  key={t.token}
+                  style={{
+                    borderRadius: 12,
+                    border: '1px solid #1f2937',
+                    padding: 12,
+                    display: 'flex',
+                    gap: 12,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div>
+                    <QRCode value={t.token} size={140} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 220 }}>
+                    <div style={{ display: 'flex', alignItems: 'center' }}>
+                      <strong>
+                        {t.origin} → {t.destination}
+                      </strong>
+                      {renderStatusPill(t)}
+                    </div>
+                    <p style={{ margin: '4px 0', fontSize: 13 }}>
+                      <strong>Type:</strong> {t.ticketType || '—'} |{' '}
+                      <strong>Zone:</strong> {t.ticketZone || '—'}
+                    </p>
+                    <p style={{ margin: '4px 0', fontSize: 12 }}>
+                      <strong>Token:</strong>{' '}
+                      <code style={{ wordBreak: 'break-all' }}>{t.token}</code>
+                    </p>
+                    <p style={{ margin: '4px 0', fontSize: 13 }}>
+                      <strong>Expires at (UTC):</strong> {t.expiresAt}
+                    </p>
+                    <p style={{ margin: '4px 0', fontSize: 13 }}>
+                      <strong>Time remaining:</strong>{' '}
+                      {getTicketStatus(t) === 'expired'
+                        ? 'Expired'
+                        : formatRemaining(t.expiresAt)}
+                    </p>
+
+                    {t.personalizedId && (
+                      <p style={{ margin: '4px 0', fontSize: 13 }}>
+                        <strong>Personalized ID:</strong> {t.personalizedId}
+                      </p>
+                    )}
+
+                    {t.firstCheckedAt && (
+                      <p style={{ margin: '4px 0', fontSize: 11, color: '#9ca3af' }}>
+                        First checked at: {formatTimestamp(t.firstCheckedAt)}{' '}
+                        {t.alreadyChecked ? '(re-check)' : '(first time)'}
+                      </p>
+                    )}
+
+                    <div style={{ marginTop: 6, display: 'flex', gap: 8 }}>
+                      <button
+                        onClick={() => window.print()}
+                        style={{
+                          ...buttonStyle,
+                          backgroundColor: '#16a34a',
+                          padding: '4px 10px',
+                          fontSize: 12,
+                        }}
+                      >
+                        Print
+                      </button>
+                      <button
+                        onClick={() => handleDeleteTicket(t.token)}
+                        style={{
+                          ...buttonStyle,
+                          backgroundColor: '#4b5563',
+                          padding: '4px 10px',
+                          fontSize: 12,
+                        }}
+                      >
+                        Remove from this device
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* HISTORY / EXPIRED TICKETS */}
+        {expiredTickets.length > 0 && (
+          <div style={{ marginTop: 20 }}>
+            <h4 style={{ margin: '8px 0' }}>Ticket history (expired)</h4>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {expiredTickets.map((t) => (
+                <div
+                  key={t.token}
+                  style={{
+                    borderRadius: 10,
+                    border: '1px dashed #374151',
+                    padding: 10,
+                    fontSize: 12,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>
+                      {t.origin} → {t.destination}
+                    </span>
+                    <span style={{ color: '#dc2626' }}>Expired</span>
+                  </div>
+                  <div>
+                    <strong>Type:</strong> {t.ticketType || '—'} |{' '}
+                    <strong>Zone:</strong> {t.ticketZone || '—'}
+                  </div>
+                  <div>
+                    <strong>Expires at:</strong> {t.expiresAt}
+                  </div>
+                  {t.firstCheckedAt && (
+                    <div>
+                      <strong>First checked:</strong>{' '}
+                      {formatTimestamp(t.firstCheckedAt)}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => handleDeleteTicket(t.token)}
+                    style={{
+                      ...buttonStyle,
+                      backgroundColor: '#4b5563',
+                      padding: '3px 8px',
+                      fontSize: 11,
+                      marginTop: 4,
+                    }}
+                  >
+                    Remove from history
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -550,7 +668,8 @@ function App() {
       <div style={cardStyle}>
         <h2 style={{ marginTop: 0 }}>Scan &amp; Verify Ticket</h2>
         <p style={{ marginTop: 0, color: '#555' }}>
-          Point your camera at an AETT QR code to check if the address→address ticket is valid.
+          Point your camera at an AETT QR code to check if the address→address
+          ticket is valid. This works for your tickets and for any compatible AETT ticket.
         </p>
 
         <div style={{ maxWidth: 320, width: '100%', marginTop: 16 }}>
@@ -588,7 +707,8 @@ function App() {
           )}
           {(scanOrigin || scanDestination) && (
             <p style={{ fontSize: 13 }}>
-              <strong>Route:</strong> {scanOrigin || '—'} → {scanDestination || '—'}
+              <strong>Route:</strong> {scanOrigin || '—'} →{' '}
+              {scanDestination || '—'}
             </p>
           )}
           {scanTicketType && (
@@ -609,7 +729,7 @@ function App() {
           )}
           {scanFirstCheckedAt && (
             <p style={{ fontSize: 11, color: '#9ca3af' }}>
-              First checked at: {scanFirstCheckedAt}{' '}
+              First checked at: {formatTimestamp(scanFirstCheckedAt)}{' '}
               {scanAlreadyChecked ? '(re-check)' : '(first time)'}
             </p>
           )}
@@ -628,7 +748,7 @@ function App() {
             <span style={{ fontSize: 14, color: 'green', fontWeight: 600 }}>
               ✅ Ticket is VALID
               {scanAlreadyChecked && scanFirstCheckedAt
-                ? ` (already checked at ${scanFirstCheckedAt})`
+                ? ` (already checked at ${formatTimestamp(scanFirstCheckedAt)})`
                 : ' (first check)'}
             </span>
           )}
@@ -655,7 +775,7 @@ function App() {
       <header style={headerStyle}>
         <h1 style={{ margin: 0, fontSize: 22 }}>AETT</h1>
         <span style={{ fontSize: 13, color: '#ddd' }}>
-          Anonymous E-Ticket Toolkit (address→address)
+          Anonymous E-Ticket Toolkit (address→address, multi-ticket wallet)
         </span>
       </header>
 
@@ -668,7 +788,7 @@ function App() {
               ...(activeTab === 'wallet' ? tabButtonActiveStyle : {}),
             }}
           >
-            🎫 My Ticket
+            🎫 My Tickets
           </button>
           <button
             onClick={() => setActiveTab('scan')}

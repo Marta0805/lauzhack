@@ -44,10 +44,15 @@ def parse_allowed_origins(raw: str):
       - AETT_ALLOWED_ORIGINS=http://localhost:3000
       - AETT_ALLOWED_ORIGINS=http://a.com,http://b.com
       - AETT_ALLOWED_ORIGINS=["http://a.com","http://b.com"]
+      - AETT_ALLOWED_ORIGINS=*
     """
     raw = (raw or "").strip()
     if not raw:
         return ["http://localhost:3000"]
+
+    # wildcard za hackathon: dozvoli sve
+    if raw == "*":
+        return ["*"]
 
     # try JSON array first (["http://a", "http://b"])
     if raw.startswith("["):
@@ -66,12 +71,13 @@ app = FastAPI(title="AETT Backend (stateless tickets)")
 
 origins = parse_allowed_origins(settings.allowed_origins_raw)
 
+# Ako si u .env stavila AETT_ALLOWED_ORIGINS="*" → ovde će biti ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "X-API-Key", "Content-Type"],
+    allow_methods=["*"],   # dozvoli sve metode (uklj. OPTIONS, POST, GET...)
+    allow_headers=["*"],   # dozvoli sve headere (Content-Type, X-API-Key, itd.)
 )
 
 # ---------------------------------------------------------------------------
@@ -100,13 +106,18 @@ class TicketPayload(BaseModel):
     sub: Literal["ticket"] = "ticket"
     ticket_type: Literal["single", "2h", "day", "monthly"]
     zone: str
-    origin: str                 # start station / zone
-    destination: str            # end station / zone
+
+    # address → address
+    origin: str
+    destination: str
+
     iat: int  # issued at (unix seconds)
     exp: int  # expires at (unix seconds)
     iss: str
     chain: Optional[str] = None  # optional "cybertrack" hash
-    personalized_id: Optional[str] = None  # optional, for opt-in personalization
+
+    # optional personalization
+    personalized_id: Optional[str] = None
 
     def expires_at_iso(self) -> str:
         return datetime.fromtimestamp(self.exp, tz=timezone.utc).isoformat()
@@ -115,8 +126,8 @@ class TicketPayload(BaseModel):
 # simple in-memory "blockchain-like" last hash
 LAST_CHAIN_HASH: Optional[str] = None
 
-# simple in-memory log of first checks: jti -> ISO timestamp
-CHECK_LOG: Dict[str, str] = {}
+# kada je dati ticket (jti) prvi put skeniran
+FIRST_SCAN: Dict[str, int] = {}
 
 
 def encode_ticket(payload: TicketPayload) -> str:
@@ -153,7 +164,6 @@ def decode_and_verify(token: str) -> TicketPayload:
     try:
         payload_json = _b64url_decode(payload_b64).decode("utf-8")
         payload_data = json.loads(payload_json)
-        # pydantic v1: use parse_obj
         payload = TicketPayload.parse_obj(payload_data)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid payload")
@@ -178,7 +188,7 @@ class BuyRequest(BaseModel):
     zone: str
     origin: str
     destination: str
-    personalized_id: Optional[str] = None  # optional, anonymous by default
+    personalized_id: Optional[str] = None
 
 
 class BuyResponse(BaseModel):
@@ -190,13 +200,16 @@ class BuyResponse(BaseModel):
     destination: str
     chain: Optional[str] = None
     personalized_id: Optional[str] = None
+
+    # za UX: odmah znamo da karta još nije očitana
     first_checked_at: Optional[str] = None
-    already_checked: Optional[bool] = None
+    already_checked: bool = False
 
 
 class VerifyResponse(BaseModel):
     valid: bool
     reason: Optional[str] = None
+
     expires_at: Optional[str] = None
     ticket_type: Optional[str] = None
     zone: Optional[str] = None
@@ -204,8 +217,10 @@ class VerifyResponse(BaseModel):
     destination: Optional[str] = None
     chain: Optional[str] = None
     personalized_id: Optional[str] = None
+
+    # multi-scan info (3 voza, 3 konduktera)
     first_checked_at: Optional[str] = None
-    already_checked: Optional[bool] = None
+    already_checked: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -230,8 +245,10 @@ async def require_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
     dependencies=[Depends(require_api_key)],
 )
 async def buy_ticket(req: BuyRequest):
-    # Issue a new stateless ticket.
-    # The QR code should encode ONLY the `token` string from this response.
+    """
+    Issue a new stateless ticket.
+    The QR code should encode ONLY the `token` string from this response.
+    """
     global LAST_CHAIN_HASH
 
     now = datetime.now(tz=timezone.utc)
@@ -242,7 +259,7 @@ async def buy_ticket(req: BuyRequest):
     prev = LAST_CHAIN_HASH or ""
     raw_chain = (
         f"{prev}|{req.ticket_type}|{req.zone}|{req.origin}|"
-        f"{req.destination}|{req.personalized_id or ''}|{int(now.timestamp())}"
+        f"{req.destination}|{int(now.timestamp())}"
     )
     chain_hash = _b64url_encode(
         hmac.new(
@@ -284,24 +301,33 @@ async def buy_ticket(req: BuyRequest):
 
 @app.post("/tickets/verify", response_model=VerifyResponse)
 async def verify_ticket(token: str = Body(..., embed=True)):
-    # Conductor app hits this endpoint with the scanned QR payload.
-    # Body: { "token": "<opaque-token-string>" }
+    """
+    Conductor app hits this endpoint with the scanned QR payload.
+    Body: { "token": "<opaque-token-string>" }
+
+    Ticket ostaje validan i kada ga skeniraju više konduktera:
+    - dok ne istekne exp, `valid=True`
+    - čuvamo samo vreme PRVOG skeniranja (FIRST_SCAN[jti])
+    - vraćamo `already_checked = True/False`
+    """
+    global FIRST_SCAN
+
     try:
         payload = decode_and_verify(token)
     except HTTPException as ex:
-        # Normalize into VerifyResponse
         reason = ex.detail if isinstance(ex.detail, str) else "invalid"
         return VerifyResponse(valid=False, reason=reason)
 
-    # copy-safe + multi-check:
-    # first scan: store timestamp, later scans: flag as already_checked
-    now_iso = datetime.now(tz=timezone.utc).isoformat()
-    first_checked_at = CHECK_LOG.get(payload.jti)
-    already_checked = first_checked_at is not None
+    now_ts = int(datetime.now(tz=timezone.utc).timestamp())
+    first_ts = FIRST_SCAN.get(payload.jti)
+    already = first_ts is not None
 
-    if not already_checked:
-        CHECK_LOG[payload.jti] = now_iso
-        first_checked_at = now_iso
+    if first_ts is None:
+        # prvo očitavanje ove karte
+        first_ts = now_ts
+        FIRST_SCAN[payload.jti] = first_ts
+
+    first_iso = datetime.fromtimestamp(first_ts, tz=timezone.utc).isoformat()
 
     return VerifyResponse(
         valid=True,
@@ -312,8 +338,8 @@ async def verify_ticket(token: str = Body(..., embed=True)):
         destination=payload.destination,
         chain=payload.chain,
         personalized_id=payload.personalized_id,
-        first_checked_at=first_checked_at,
-        already_checked=already_checked,
+        first_checked_at=first_iso,
+        already_checked=already,
     )
 
 
