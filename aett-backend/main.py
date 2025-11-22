@@ -3,7 +3,7 @@ import hmac
 import json
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Literal, Optional, Dict
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -100,10 +100,13 @@ class TicketPayload(BaseModel):
     sub: Literal["ticket"] = "ticket"
     ticket_type: Literal["single", "2h", "day", "monthly"]
     zone: str
+    origin: str                 # start station / zone
+    destination: str            # end station / zone
     iat: int  # issued at (unix seconds)
     exp: int  # expires at (unix seconds)
     iss: str
     chain: Optional[str] = None  # optional "cybertrack" hash
+    personalized_id: Optional[str] = None  # optional, for opt-in personalization
 
     def expires_at_iso(self) -> str:
         return datetime.fromtimestamp(self.exp, tz=timezone.utc).isoformat()
@@ -111,6 +114,9 @@ class TicketPayload(BaseModel):
 
 # simple in-memory "blockchain-like" last hash
 LAST_CHAIN_HASH: Optional[str] = None
+
+# simple in-memory log of first checks: jti -> ISO timestamp
+CHECK_LOG: Dict[str, str] = {}
 
 
 def encode_ticket(payload: TicketPayload) -> str:
@@ -170,6 +176,9 @@ def decode_and_verify(token: str) -> TicketPayload:
 class BuyRequest(BaseModel):
     ticket_type: Literal["single", "2h", "day", "monthly"]
     zone: str
+    origin: str
+    destination: str
+    personalized_id: Optional[str] = None  # optional, anonymous by default
 
 
 class BuyResponse(BaseModel):
@@ -177,7 +186,12 @@ class BuyResponse(BaseModel):
     expires_at: str
     ticket_type: str
     zone: str
+    origin: str
+    destination: str
     chain: Optional[str] = None
+    personalized_id: Optional[str] = None
+    first_checked_at: Optional[str] = None
+    already_checked: Optional[bool] = None
 
 
 class VerifyResponse(BaseModel):
@@ -186,7 +200,12 @@ class VerifyResponse(BaseModel):
     expires_at: Optional[str] = None
     ticket_type: Optional[str] = None
     zone: Optional[str] = None
+    origin: Optional[str] = None
+    destination: Optional[str] = None
     chain: Optional[str] = None
+    personalized_id: Optional[str] = None
+    first_checked_at: Optional[str] = None
+    already_checked: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +240,10 @@ async def buy_ticket(req: BuyRequest):
     # --- "Cybertrack" hash-chain:
     # each ticket links to the previous ticket's hash using a HMAC-based hash
     prev = LAST_CHAIN_HASH or ""
-    raw_chain = f"{prev}|{req.ticket_type}|{req.zone}|{int(now.timestamp())}"
+    raw_chain = (
+        f"{prev}|{req.ticket_type}|{req.zone}|{req.origin}|"
+        f"{req.destination}|{req.personalized_id or ''}|{int(now.timestamp())}"
+    )
     chain_hash = _b64url_encode(
         hmac.new(
             settings.secret_key.encode("utf-8"),
@@ -235,10 +257,13 @@ async def buy_ticket(req: BuyRequest):
         jti=os.urandom(16).hex(),
         ticket_type=req.ticket_type,
         zone=req.zone,
+        origin=req.origin,
+        destination=req.destination,
         iat=int(now.timestamp()),
         exp=int(exp.timestamp()),
         iss=settings.issuer,
         chain=chain_hash,
+        personalized_id=req.personalized_id,
     )
 
     token = encode_ticket(payload)
@@ -248,7 +273,12 @@ async def buy_ticket(req: BuyRequest):
         expires_at=payload.expires_at_iso(),
         ticket_type=req.ticket_type,
         zone=req.zone,
+        origin=req.origin,
+        destination=req.destination,
         chain=chain_hash,
+        personalized_id=req.personalized_id,
+        first_checked_at=None,
+        already_checked=False,
     )
 
 
@@ -263,12 +293,27 @@ async def verify_ticket(token: str = Body(..., embed=True)):
         reason = ex.detail if isinstance(ex.detail, str) else "invalid"
         return VerifyResponse(valid=False, reason=reason)
 
+    # copy-safe + multi-check:
+    # first scan: store timestamp, later scans: flag as already_checked
+    now_iso = datetime.now(tz=timezone.utc).isoformat()
+    first_checked_at = CHECK_LOG.get(payload.jti)
+    already_checked = first_checked_at is not None
+
+    if not already_checked:
+        CHECK_LOG[payload.jti] = now_iso
+        first_checked_at = now_iso
+
     return VerifyResponse(
         valid=True,
         expires_at=payload.expires_at_iso(),
         ticket_type=payload.ticket_type,
         zone=payload.zone,
+        origin=payload.origin,
+        destination=payload.destination,
         chain=payload.chain,
+        personalized_id=payload.personalized_id,
+        first_checked_at=first_checked_at,
+        already_checked=already_checked,
     )
 
 

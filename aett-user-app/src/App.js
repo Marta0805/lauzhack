@@ -6,12 +6,12 @@ import { QrReader } from 'react-qr-reader';
 const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:8000';
 const API_KEY = process.env.REACT_APP_API_KEY || 'my-demo-api-key-123';
 
-const TICKET_TYPE_DEFAULTS = {
-  single: 60,
-  '2h': 120,
-  day: 24 * 60,
-  monthly: 30 * 24 * 60,
-};
+// helper for Google Maps embed – no API key needed
+function getEmbedMapUrl(origin, destination) {
+  if (!origin || !destination) return null;
+  const q = encodeURIComponent(`${origin} to ${destination}`);
+  return `https://maps.google.com/maps?q=${q}&output=embed`;
+}
 
 function App() {
   const [activeTab, setActiveTab] = useState('wallet'); // 'wallet' | 'scan'
@@ -19,21 +19,30 @@ function App() {
   // --- Wallet state (form) ---
   const [selectedType, setSelectedType] = useState('2h');
   const [selectedZone, setSelectedZone] = useState('AB');
-  const [durationMinutes, setDurationMinutes] = useState(
-    TICKET_TYPE_DEFAULTS['2h']
-  );
+
+  // free-text addresses
+  const [origin, setOrigin] = useState('Bern, Switzerland');
+  const [destination, setDestination] = useState('Zürich, Switzerland');
+
+  const [personalized, setPersonalized] = useState(false);
+  const [personalizedIdInput, setPersonalizedIdInput] = useState('');
 
   // --- Active ticket ---
   const [ticket, setTicket] = useState(null);
   const [ticketType, setTicketType] = useState(null);
   const [ticketZone, setTicketZone] = useState(null);
+  const [ticketOrigin, setTicketOrigin] = useState(null);
+  const [ticketDestination, setTicketDestination] = useState(null);
+  const [ticketPersonalizedId, setTicketPersonalizedId] = useState(null);
   const [expiresAt, setExpiresAt] = useState(null);
+  const [firstCheckedAt, setFirstCheckedAt] = useState(null);
+  const [alreadyChecked, setAlreadyChecked] = useState(false);
 
   const [buyLoading, setBuyLoading] = useState(false);
   const [buyError, setBuyError] = useState(null);
   const [justBought, setJustBought] = useState(false);
 
-  // countdown
+  // countdown (from expiresAt, controlled by backend)
   const [remainingSeconds, setRemainingSeconds] = useState(null);
 
   // --- Scan / verify state ---
@@ -42,6 +51,11 @@ function App() {
   const [scanExpiresAt, setScanExpiresAt] = useState(null);
   const [scanTicketType, setScanTicketType] = useState(null);
   const [scanZone, setScanZone] = useState(null);
+  const [scanOrigin, setScanOrigin] = useState(null);
+  const [scanDestination, setScanDestination] = useState(null);
+  const [scanPersonalizedId, setScanPersonalizedId] = useState(null);
+  const [scanFirstCheckedAt, setScanFirstCheckedAt] = useState(null);
+  const [scanAlreadyChecked, setScanAlreadyChecked] = useState(false);
   const [scanStatus, setScanStatus] = useState('idle'); // idle | verifying | valid | invalid | error
   const [scanError, setScanError] = useState(null);
 
@@ -54,7 +68,7 @@ function App() {
     return () => clearTimeout(id);
   }, [justBought]);
 
-  // countdown until expiry
+  // countdown until expiry (based on expires_at from backend)
   useEffect(() => {
     if (!expiresAt) {
       setRemainingSeconds(null);
@@ -88,8 +102,12 @@ function App() {
         body: JSON.stringify({
           ticket_type: selectedType,
           zone: selectedZone,
-          // backend sada sam odlučuje trajanje na osnovu konfiguracije;
-          // durationMinutes je samo UI hint ovde
+          origin,
+          destination,
+          // lifetime is decided by backend config
+          personalized_id: personalized
+            ? (personalizedIdInput.trim() || null)
+            : null,
         }),
       });
 
@@ -103,6 +121,11 @@ function App() {
       setExpiresAt(data.expires_at);
       setTicketType(data.ticket_type);
       setTicketZone(data.zone);
+      setTicketOrigin(data.origin);
+      setTicketDestination(data.destination);
+      setTicketPersonalizedId(data.personalized_id || null);
+      setFirstCheckedAt(data.first_checked_at || null);
+      setAlreadyChecked(Boolean(data.already_checked));
 
       setJustBought(true);
       setActiveTab('wallet');
@@ -122,6 +145,11 @@ function App() {
     setScanExpiresAt(null);
     setScanTicketType(null);
     setScanZone(null);
+    setScanOrigin(null);
+    setScanDestination(null);
+    setScanPersonalizedId(null);
+    setScanFirstCheckedAt(null);
+    setScanAlreadyChecked(false);
 
     try {
       const resp = await fetch(`${API_BASE}/tickets/verify`, {
@@ -141,11 +169,18 @@ function App() {
       setScanExpiresAt(data.expires_at ?? null);
       setScanTicketType(data.ticket_type ?? null);
       setScanZone(data.zone ?? null);
+      setScanOrigin(data.origin ?? null);
+      setScanDestination(data.destination ?? null);
+      setScanPersonalizedId(data.personalized_id ?? null);
+      setScanFirstCheckedAt(data.first_checked_at ?? null);
+      setScanAlreadyChecked(Boolean(data.already_checked));
 
       if (data.valid) {
         setScanStatus('valid');
+        setScanError(null);
       } else {
         setScanStatus('invalid');
+        setScanError(data.reason || 'Ticket invalid.');
       }
     } catch (e) {
       console.error(e);
@@ -155,29 +190,20 @@ function App() {
   }
 
   function handleScanResult(result, error) {
-    // `result` is a ZXing Result object
     if (result?.text) {
       const text = result.text.trim();
       setScanRaw(text);
 
       if (text && text !== scanToken) {
         setScanToken(text);
-        // QR sada sadrži samo opaque token string
         verifyToken(text);
       }
     }
-
-    if (error) {
-      // scanner errors are frequent; don't spam UI
-      // console.warn(error);
-    }
+    // ignore scanner errors spam
   }
 
   function handleTicketTypeChange(e) {
-    const t = e.target.value;
-    setSelectedType(t);
-    const def = TICKET_TYPE_DEFAULTS[t] ?? 60;
-    setDurationMinutes(def);
+    setSelectedType(e.target.value);
   }
 
   function handleZoneChange(e) {
@@ -188,8 +214,13 @@ function App() {
     setTicket(null);
     setTicketType(null);
     setTicketZone(null);
+    setTicketOrigin(null);
+    setTicketDestination(null);
+    setTicketPersonalizedId(null);
     setExpiresAt(null);
     setRemainingSeconds(null);
+    setFirstCheckedAt(null);
+    setAlreadyChecked(false);
   }
 
   function loadDemoQr() {
@@ -197,11 +228,15 @@ function App() {
 
     setScanRaw(token);
     setScanToken(token);
-    // offline demo: fake-ujemo metapodatke u UI
     const fakeExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     setScanExpiresAt(fakeExpiry);
     setScanTicketType('2h');
     setScanZone('AB');
+    setScanOrigin('Bern, Switzerland');
+    setScanDestination('Zürich, Switzerland');
+    setScanPersonalizedId(null);
+    setScanFirstCheckedAt(new Date().toISOString());
+    setScanAlreadyChecked(false);
     setScanStatus('valid');
     setScanError(null);
   }
@@ -230,13 +265,13 @@ function App() {
     let bg = '';
     if (status === 'active') {
       label = 'Active';
-      bg = '#16a34a'; // green
+      bg = '#16a34a';
     } else if (status === 'expiring') {
       label = 'Expiring soon';
-      bg = '#f97316'; // orange
+      bg = '#f97316';
     } else {
       label = 'Expired';
-      bg = '#dc2626'; // red
+      bg = '#dc2626';
     }
 
     return (
@@ -260,6 +295,7 @@ function App() {
 
   function renderWallet() {
     const status = getTicketStatus();
+    const embedUrl = getEmbedMapUrl(origin, destination);
 
     return (
       <div style={cardStyle}>
@@ -272,7 +308,7 @@ function App() {
           )}
         </h2>
         <p style={{ marginTop: 0, color: '#555' }}>
-          No account, no login — your ticket lives only in this browser tab.
+          No account, no login — your address→address ticket lives only in this browser tab.
         </p>
 
         <div
@@ -317,20 +353,98 @@ function App() {
           </div>
 
           <div>
-            <label style={{ fontSize: 13, marginRight: 8 }}>
-              Duration (minutes)
+            <label style={{ fontSize: 13, display: 'block', marginBottom: 4 }}>
+              From address
             </label>
             <input
-              type="number"
-              min="1"
-              max="1440"
-              value={durationMinutes}
-              onChange={(e) =>
-                setDurationMinutes(Number(e.target.value) || 1)
-              }
-              style={{ width: 80, padding: 4 }}
+              type="text"
+              value={origin}
+              onChange={(e) => setOrigin(e.target.value)}
+              style={{ padding: 4, minWidth: 220 }}
+              placeholder="Street, city…"
             />
           </div>
+
+          <div>
+            <label style={{ fontSize: 13, display: 'block', marginBottom: 4 }}>
+              To address
+            </label>
+            <input
+              type="text"
+              value={destination}
+              onChange={(e) => setDestination(e.target.value)}
+              style={{ padding: 4, minWidth: 220 }}
+              placeholder="Street, city…"
+            />
+          </div>
+        </div>
+
+        {/* MAP PREVIEW (Google Maps embed, no key) */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 13, marginBottom: 4 }}>Route map preview</div>
+          {embedUrl ? (
+            <>
+              <div
+                style={{
+                  width: '100%',
+                  maxWidth: 640,
+                  borderRadius: 12,
+                  overflow: 'hidden',
+                  border: '1px solid #1f2937',
+                }}
+              >
+                <iframe
+                  title="Route map"
+                  src={embedUrl}
+                  width="100%"
+                  height="320"
+                  style={{ border: 0 }}
+                  loading="lazy"
+                  referrerPolicy="no-referrer-when-downgrade"
+                />
+              </div>
+              <p style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>
+                Embedded Google Maps view based on your origin and destination.
+              </p>
+            </>
+          ) : (
+            <p style={{ fontSize: 12, color: '#9ca3af' }}>
+              Enter both origin and destination to see the route preview.
+            </p>
+          )}
+        </div>
+
+        <div
+          style={{
+            marginBottom: 16,
+            padding: 8,
+            borderRadius: 8,
+            backgroundColor: '#020617',
+          }}
+        >
+          <label style={{ fontSize: 13 }}>
+            <input
+              type="checkbox"
+              checked={personalized}
+              onChange={(e) => setPersonalized(e.target.checked)}
+              style={{ marginRight: 6 }}
+            />
+            Personalize this ticket (optional)
+          </label>
+          {personalized && (
+            <div style={{ marginTop: 6 }}>
+              <input
+                type="text"
+                value={personalizedIdInput}
+                onChange={(e) => setPersonalizedIdInput(e.target.value)}
+                placeholder="e.g. SwissPass ID / nickname"
+                style={{ padding: 4, minWidth: 260 }}
+              />
+              <p style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>
+                If left empty, ticket stays anonymous. This value is embedded only in the token payload.
+              </p>
+            </div>
+          )}
         </div>
 
         <button onClick={buyTicket} disabled={buyLoading} style={buttonStyle}>
@@ -350,18 +464,22 @@ function App() {
 
             <div style={{ marginBottom: 16 }}>
               <QRCode
-                value={ticket} // QR sada nosi samo opaque token
+                value={ticket}
                 size={240}
               />
             </div>
 
             <p>
-              <strong>Token:</strong>{' '}
-              <code style={{ wordBreak: 'break-all' }}>{ticket}</code>
+              <strong>Route:</strong>{' '}
+              {ticketOrigin || '—'} → {ticketDestination || '—'}
             </p>
             <p>
               <strong>Type:</strong> {ticketType || '—'} |{' '}
               <strong>Zone:</strong> {ticketZone || '—'}
+            </p>
+            <p>
+              <strong>Token:</strong>{' '}
+              <code style={{ wordBreak: 'break-all' }}>{ticket}</code>
             </p>
             <p>
               <strong>Expires at (UTC):</strong> {expiresAt}
@@ -375,16 +493,39 @@ function App() {
               </p>
             )}
 
-            <button
-              onClick={burnWallet}
-              style={{
-                ...buttonStyle,
-                backgroundColor: '#374151',
-                marginTop: 12,
-              }}
-            >
-              Burn wallet
-            </button>
+            {ticketPersonalizedId && (
+              <p style={{ fontSize: 13 }}>
+                <strong>Personalized ID:</strong> {ticketPersonalizedId}
+              </p>
+            )}
+
+            {firstCheckedAt && (
+              <p style={{ fontSize: 11, color: '#9ca3af' }}>
+                First checked at: {firstCheckedAt}{' '}
+                {alreadyChecked ? '(re-check)' : '(first time)'}
+              </p>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button
+                onClick={burnWallet}
+                style={{
+                  ...buttonStyle,
+                  backgroundColor: '#374151',
+                }}
+              >
+                Burn wallet
+              </button>
+              <button
+                onClick={() => window.print()}
+                style={{
+                  ...buttonStyle,
+                  backgroundColor: '#16a34a',
+                }}
+              >
+                Print ticket
+              </button>
+            </div>
 
             <p
               style={{
@@ -409,7 +550,7 @@ function App() {
       <div style={cardStyle}>
         <h2 style={{ marginTop: 0 }}>Scan &amp; Verify Ticket</h2>
         <p style={{ marginTop: 0, color: '#555' }}>
-          Point your camera at an AETT QR code to check if the ticket is valid.
+          Point your camera at an AETT QR code to check if the address→address ticket is valid.
         </p>
 
         <div style={{ maxWidth: 320, width: '100%', marginTop: 16 }}>
@@ -445,6 +586,11 @@ function App() {
               <strong>Token:</strong> {scanToken}
             </p>
           )}
+          {(scanOrigin || scanDestination) && (
+            <p style={{ fontSize: 13 }}>
+              <strong>Route:</strong> {scanOrigin || '—'} → {scanDestination || '—'}
+            </p>
+          )}
           {scanTicketType && (
             <p style={{ fontSize: 13 }}>
               <strong>Type:</strong> {scanTicketType} |{' '}
@@ -454,6 +600,17 @@ function App() {
           {scanExpiresAt && (
             <p style={{ fontSize: 13 }}>
               <strong>Expires at:</strong> {scanExpiresAt}
+            </p>
+          )}
+          {scanPersonalizedId && (
+            <p style={{ fontSize: 12 }}>
+              <strong>Personalized ID:</strong> {scanPersonalizedId}
+            </p>
+          )}
+          {scanFirstCheckedAt && (
+            <p style={{ fontSize: 11, color: '#9ca3af' }}>
+              First checked at: {scanFirstCheckedAt}{' '}
+              {scanAlreadyChecked ? '(re-check)' : '(first time)'}
             </p>
           )}
         </div>
@@ -470,11 +627,15 @@ function App() {
           {scanStatus === 'valid' && (
             <span style={{ fontSize: 14, color: 'green', fontWeight: 600 }}>
               ✅ Ticket is VALID
+              {scanAlreadyChecked && scanFirstCheckedAt
+                ? ` (already checked at ${scanFirstCheckedAt})`
+                : ' (first check)'}
             </span>
           )}
           {scanStatus === 'invalid' && (
             <span style={{ fontSize: 14, color: 'red', fontWeight: 600 }}>
               ❌ Ticket is INVALID or expired
+              {scanError ? ` — ${scanError}` : ''}
             </span>
           )}
           {scanStatus === 'error' && (
@@ -494,7 +655,7 @@ function App() {
       <header style={headerStyle}>
         <h1 style={{ margin: 0, fontSize: 22 }}>AETT</h1>
         <span style={{ fontSize: 13, color: '#ddd' }}>
-          Anonymous E-Ticket Toolkit
+          Anonymous E-Ticket Toolkit (address→address)
         </span>
       </header>
 

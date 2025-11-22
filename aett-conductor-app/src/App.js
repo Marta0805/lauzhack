@@ -1,4 +1,3 @@
-// src/App.js
 import React, { useState } from 'react';
 import { QrReader } from 'react-qr-reader';
 
@@ -14,6 +13,12 @@ function App() {
   const [zone, setZone] = useState(null);
   const [chain, setChain] = useState(null);             // "cybertrack" hash
 
+  const [origin, setOrigin] = useState(null);
+  const [destination, setDestination] = useState(null);
+  const [personalizedId, setPersonalizedId] = useState(null);
+  const [firstCheckedAt, setFirstCheckedAt] = useState(null);
+  const [alreadyChecked, setAlreadyChecked] = useState(false);
+
   async function verifyScannedPayload(scannedText) {
     if (!scannedText) return;
 
@@ -24,6 +29,11 @@ function App() {
     setTicketType(null);
     setZone(null);
     setChain(null);
+    setOrigin(null);
+    setDestination(null);
+    setPersonalizedId(null);
+    setFirstCheckedAt(null);
+    setAlreadyChecked(false);
 
     // 1. Izvuci token:
     //    - ako je QR čisti token (novi sistem) -> koristi direktno
@@ -60,7 +70,11 @@ function App() {
       }
 
       const data = await resp.json();
-      // data: { valid, reason?, expires_at?, ticket_type?, zone?, chain? }
+      // data: {
+      //   valid, reason?, expires_at?, ticket_type?, zone?,
+      //   origin?, destination?, chain?, personalized_id?,
+      //   first_checked_at?, already_checked?
+      // }
 
       if (data.valid) {
         setStatus('valid');
@@ -73,6 +87,11 @@ function App() {
       setTicketType(data.ticket_type ?? null);
       setZone(data.zone ?? null);
       setChain(data.chain ?? null);
+      setOrigin(data.origin ?? null);
+      setDestination(data.destination ?? null);
+      setPersonalizedId(data.personalized_id ?? null);
+      setFirstCheckedAt(data.first_checked_at ?? null);
+      setAlreadyChecked(Boolean(data.already_checked));
     } catch (err) {
       console.error(err);
       setStatus('error');
@@ -85,9 +104,16 @@ function App() {
       return <span>🔄 Verifying…</span>;
     }
     if (status === 'valid') {
+      if (alreadyChecked && firstCheckedAt) {
+        return (
+          <span style={{ color: 'lime', fontWeight: 600 }}>
+            ✅ VALID (already checked at {firstCheckedAt})
+          </span>
+        );
+      }
       return (
         <span style={{ color: 'lime', fontWeight: 600 }}>
-          ✅ VALID
+          ✅ VALID (first check)
         </span>
       );
     }
@@ -124,7 +150,7 @@ function App() {
       <header style={{ width: '100%', maxWidth: 800, marginBottom: 16 }}>
         <h1 style={{ margin: 0, fontSize: 24 }}>AETT Conductor Scanner</h1>
         <p style={{ margin: 0, fontSize: 14, color: '#9ca3af' }}>
-          Scan passenger QR codes and verify tickets against the backend.
+          Scan passenger QR codes and verify anonymous start→destination tickets against the backend.
         </p>
       </header>
 
@@ -180,9 +206,9 @@ function App() {
               </p>
             )}
 
-            {expiresAt && (
+            {origin && destination && (
               <p style={{ fontSize: 13 }}>
-                <strong>Expires at (UTC):</strong> {expiresAt}
+                <strong>Route:</strong> {origin} → {destination}
               </p>
             )}
 
@@ -193,9 +219,28 @@ function App() {
               </p>
             )}
 
+            {expiresAt && (
+              <p style={{ fontSize: 13 }}>
+                <strong>Expires at (UTC):</strong> {expiresAt}
+              </p>
+            )}
+
+            {personalizedId && (
+              <p style={{ fontSize: 12 }}>
+                <strong>Personalized ID (optional):</strong> {personalizedId}
+              </p>
+            )}
+
             {chain && (
               <p style={{ fontSize: 11, color: '#6b7280', wordBreak: 'break-all' }}>
                 <strong>Chain hash:</strong> {chain}
+              </p>
+            )}
+
+            {firstCheckedAt && (
+              <p style={{ fontSize: 11, color: '#9ca3af' }}>
+                First checked at: {firstCheckedAt}{' '}
+                {alreadyChecked ? '(re-check)' : '(first time)'}
               </p>
             )}
           </div>
