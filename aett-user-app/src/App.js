@@ -22,10 +22,13 @@ function formatTimestamp(ts) {
 }
 
 function App() {
-  const [activeTab, setActiveTab] = useState('wallet'); // 'wallet' | 'scan'
+  const [activeTab, setActiveTab] = useState('wallet'); // 'wallet' | 'scan' | 'card'
+
+  // --- Virtualna kartica (AETT Card ID, lokalno po uređaju) ---
+  const [cardId, setCardId] = useState(null);
 
   // --- Wallet form state ---
-  const [selectedType, setSelectedType] = useState('2h');
+  const [selectedType, setSelectedType] = useState('day');
   const [selectedZone, setSelectedZone] = useState('AB');
   const [origin, setOrigin] = useState('Bern, Switzerland');
   const [destination, setDestination] = useState('Zürich, Switzerland');
@@ -56,6 +59,18 @@ function App() {
   const [scanError, setScanError] = useState(null);
 
   // ----------------- Effects -----------------
+
+  // učitaj virtualnu karticu iz localStorage (ako je user već "kupio")
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('aett_card_id');
+      if (stored) {
+        setCardId(stored);
+      }
+    } catch (e) {
+      console.error('Failed to load card id', e);
+    }
+  }, []);
 
   // učitaj istoriju iz localStorage
   useEffect(() => {
@@ -106,14 +121,30 @@ function App() {
   }
 
   function formatRemaining(expiresAt) {
-    if (!expiresAt) return '';
-    const expiryMs = new Date(expiresAt).getTime();
-    const diffSec = Math.floor((expiryMs - now) / 1000);
-    if (diffSec <= 0) return '0 min 00 s';
-    const m = Math.floor(diffSec / 60);
-    const s = diffSec % 60;
-    return `${m} min ${s.toString().padStart(2, '0')} s`;
+  if (!expiresAt) return '';
+  const expiryMs = new Date(expiresAt).getTime();
+  const diffSec = Math.floor((expiryMs - now) / 1000);
+  if (diffSec <= 0) return '0 min';
+
+  const daySec = 24 * 60 * 60;
+  const days = Math.floor(diffSec / daySec);
+  const restAfterDays = diffSec % daySec;
+  const hours = Math.floor(restAfterDays / 3600);
+  const minutes = Math.floor((restAfterDays % 3600) / 60);
+
+  if (days > 0) {
+    // npr. "1 day 3 h", "12 days 0 h"
+    return `${days} day${days !== 1 ? 's' : ''} ${hours} h`;
   }
+
+  if (hours > 0) {
+    // npr. "5 h 20 min"
+    return `${hours} h ${minutes} min`;
+  }
+
+  // ispod 1h
+  return `${minutes} min`;
+}
 
   function renderStatusPill(ticket) {
     const status = getTicketStatus(ticket);
@@ -149,11 +180,58 @@ function App() {
     );
   }
 
+  // ----------------- Virtual card handlers -----------------
+
+  function createVirtualCard() {
+    try {
+      const rand =
+        window.crypto && window.crypto.randomUUID
+          ? window.crypto.randomUUID()
+          : Math.random().toString(36).slice(2) +
+            Date.now().toString(36);
+      const newId = 'CARD-' + rand;
+      localStorage.setItem('aett_card_id', newId);
+      setCardId(newId);
+      alert('Virtual AETT card created on this device.');
+    } catch (e) {
+      console.error('Failed to create virtual card', e);
+      alert('Failed to create virtual card on this device.');
+    }
+  }
+
+  function deleteVirtualCard() {
+    if (
+      !window.confirm(
+        'Delete virtual card from this device? Existing tickets will still work, but this device will forget its card ID.'
+      )
+    )
+      return;
+
+    try {
+      localStorage.removeItem('aett_card_id');
+    } catch (e) {
+      console.error('Failed to delete card id from storage', e);
+    }
+    setCardId(null);
+  }
+
+  async function copyCardId() {
+    if (!cardId) return;
+    try {
+      await navigator.clipboard.writeText(cardId);
+      alert('Card ID copied to clipboard.');
+    } catch (e) {
+      console.error('Failed to copy', e);
+      alert(cardId);
+    }
+  }
+
   // ----------------- Handleri -----------------
 
   async function buyTicket() {
     setBuyLoading(true);
     setBuyError(null);
+
     try {
       const resp = await fetch(`${API_BASE}/tickets/buy`, {
         method: 'POST',
@@ -167,8 +245,10 @@ function App() {
           origin,
           destination,
           personalized_id: personalized
-            ? (personalizedIdInput.trim() || null)
+            ? personalizedIdInput.trim() || null
             : null,
+          // virtuelna kartica – šaljemo je SAMO ako korisnik ima cardId
+          card_id: cardId || null,
         }),
       });
 
@@ -189,6 +269,7 @@ function App() {
         firstCheckedAt: data.first_checked_at || null,
         alreadyChecked: Boolean(data.already_checked),
         createdAt: new Date().toISOString(),
+        cardId: data.card_id || null,
       };
 
       // najnovija karta ide na vrh
@@ -251,8 +332,11 @@ function App() {
             t.token === token
               ? {
                   ...t,
-                  firstCheckedAt: t.firstCheckedAt || data.first_checked_at,
-                  alreadyChecked: t.alreadyChecked || Boolean(data.already_checked),
+                  firstCheckedAt:
+                    t.firstCheckedAt || data.first_checked_at,
+                  alreadyChecked:
+                    t.alreadyChecked ||
+                    Boolean(data.already_checked),
                 }
               : t
           )
@@ -296,6 +380,7 @@ function App() {
   function burnWallet() {
     if (!window.confirm('Delete all tickets from this device?')) return;
     setTickets([]);
+    // virtualna kartica ostaje; user može da je obriše u Virtual Card tabu
   }
 
   function loadDemoQr() {
@@ -303,9 +388,11 @@ function App() {
 
     setScanRaw(token);
     setScanToken(token);
-    const fakeExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const fakeExpiry = new Date(
+      Date.now() + 60 * 60 * 1000
+    ).toISOString();
     setScanExpiresAt(fakeExpiry);
-    setScanTicketType('2h');
+    setScanTicketType('day');
     setScanZone('AB');
     setScanOrigin('Bern, Switzerland');
     setScanDestination('Zürich, Switzerland');
@@ -339,8 +426,30 @@ function App() {
           )}
         </h2>
         <p style={{ marginTop: 0, color: '#555' }}>
-          No account, no login — your address→address tickets live only in this browser tab
-          (and locally in this device&apos;s history).
+          No account, no login — your address→address tickets live only in this
+          browser tab (and locally in this device&apos;s history).
+        </p>
+
+        {/* kratko pominjanje kartice + link na tab */}
+        <p style={{ fontSize: 12, color: '#9ca3af', marginTop: 4 }}>
+          Optional: you can link tickets to a pseudonymous{' '}
+          <strong>Virtual AETT Card</strong>. Manage it in the{' '}
+          <button
+            type="button"
+            onClick={() => setActiveTab('card')}
+            style={{
+              border: 'none',
+              background: 'none',
+              color: '#60a5fa',
+              cursor: 'pointer',
+              padding: 0,
+              textDecoration: 'underline',
+              fontSize: 12,
+            }}
+          >
+            Virtual Card
+          </button>{' '}
+          tab.
         </p>
 
         {/* Form za novu kartu */}
@@ -363,7 +472,6 @@ function App() {
               style={{ padding: 4, minWidth: 120 }}
             >
               <option value="single">Single</option>
-              <option value="2h">2 hours</option>
               <option value="day">Day</option>
               <option value="monthly">Monthly</option>
             </select>
@@ -475,7 +583,8 @@ function App() {
                 style={{ padding: 4, minWidth: 260 }}
               />
               <p style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>
-                If left empty, ticket stays anonymous. This value is embedded only in the token payload.
+                If left empty, ticket stays anonymous. This value is embedded
+                only in the token payload.
               </p>
             </div>
           )}
@@ -566,18 +675,28 @@ function App() {
 
                     {t.personalizedId && (
                       <p style={{ margin: '4px 0', fontSize: 13 }}>
-                        <strong>Personalized ID:</strong> {t.personalizedId}
+                        <strong>Personalized ID:</strong>{' '}
+                        {t.personalizedId}
                       </p>
                     )}
 
                     {t.firstCheckedAt && (
-                      <p style={{ margin: '4px 0', fontSize: 11, color: '#9ca3af' }}>
-                        First checked at: {formatTimestamp(t.firstCheckedAt)}{' '}
+                      <p
+                        style={{
+                          margin: '4px 0',
+                          fontSize: 11,
+                          color: '#9ca3af',
+                        }}
+                      >
+                        First checked at:{' '}
+                        {formatTimestamp(t.firstCheckedAt)}{' '}
                         {t.alreadyChecked ? '(re-check)' : '(first time)'}
                       </p>
                     )}
 
-                    <div style={{ marginTop: 6, display: 'flex', gap: 8 }}>
+                    <div
+                      style={{ marginTop: 6, display: 'flex', gap: 8 }}
+                    >
                       <button
                         onClick={() => window.print()}
                         style={{
@@ -623,7 +742,12 @@ function App() {
                     fontSize: 12,
                   }}
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                    }}
+                  >
                     <span>
                       {t.origin} → {t.destination}
                     </span>
@@ -669,7 +793,8 @@ function App() {
         <h2 style={{ marginTop: 0 }}>Scan &amp; Verify Ticket</h2>
         <p style={{ marginTop: 0, color: '#555' }}>
           Point your camera at an AETT QR code to check if the address→address
-          ticket is valid. This works for your tickets and for any compatible AETT ticket.
+          ticket is valid. This works for your tickets and for any compatible
+          AETT ticket.
         </p>
 
         <div style={{ maxWidth: 320, width: '100%', marginTop: 16 }}>
@@ -745,15 +870,29 @@ function App() {
             <span style={{ fontSize: 13 }}>Verifying ticket…</span>
           )}
           {scanStatus === 'valid' && (
-            <span style={{ fontSize: 14, color: 'green', fontWeight: 600 }}>
+            <span
+              style={{
+                fontSize: 14,
+                color: 'green',
+                fontWeight: 600,
+              }}
+            >
               ✅ Ticket is VALID
               {scanAlreadyChecked && scanFirstCheckedAt
-                ? ` (already checked at ${formatTimestamp(scanFirstCheckedAt)})`
+                ? ` (already checked at ${formatTimestamp(
+                    scanFirstCheckedAt
+                  )})`
                 : ' (first check)'}
             </span>
           )}
           {scanStatus === 'invalid' && (
-            <span style={{ fontSize: 14, color: 'red', fontWeight: 600 }}>
+            <span
+              style={{
+                fontSize: 14,
+                color: 'red',
+                fontWeight: 600,
+              }}
+            >
               ❌ Ticket is INVALID or expired
               {scanError ? ` — ${scanError}` : ''}
             </span>
@@ -763,6 +902,128 @@ function App() {
               {scanError || 'Error verifying ticket.'}
             </span>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderCard() {
+    return (
+      <div style={cardStyle}>
+        <h2 style={{ marginTop: 0 }}>Virtual AETT Card</h2>
+        <p style={{ marginTop: 0, color: '#9ca3af', fontSize: 13 }}>
+          Think of this as a <strong>pseudonymous travel card</strong> tied only
+          to this device. You can:
+        </p>
+        <ul style={{ color: '#9ca3af', fontSize: 13, paddingLeft: 20 }}>
+          <li>Buy fully anonymous QR tickets without any card at all.</li>
+          <li>
+            Or create one virtual card ID and let multiple tickets use it as a
+            shared identifier.
+          </li>
+          <li>
+            The card ID never leaves the token payload and is not linked to your
+            name or account.
+          </li>
+        </ul>
+
+        {!cardId && (
+          <div
+            style={{
+              marginTop: 16,
+              padding: 12,
+              borderRadius: 10,
+              backgroundColor: '#020617',
+              border: '1px dashed #374151',
+            }}
+          >
+            <p style={{ color: '#e5e7eb', fontSize: 13, marginTop: 0 }}>
+              You don&apos;t have a virtual card yet.
+            </p>
+            <p style={{ color: '#9ca3af', fontSize: 12 }}>
+              Creating a virtual card generates a random ID stored only in this
+              browser. New tickets from this device can carry that ID in their
+              payload.
+            </p>
+            <button
+              type="button"
+              onClick={createVirtualCard}
+              style={{
+                ...buttonStyle,
+                backgroundColor: '#4b5563',
+                fontSize: 13,
+              }}
+            >
+              Create virtual card on this device
+            </button>
+          </div>
+        )}
+
+        {cardId && (
+          <div
+            style={{
+              marginTop: 16,
+              padding: 12,
+              borderRadius: 10,
+              backgroundColor: '#020617',
+              border: '1px solid #1f2937',
+              display: 'flex',
+              gap: 16,
+              flexWrap: 'wrap',
+            }}
+          >
+            <div>
+              <QRCode value={cardId} size={160} />
+            </div>
+            <div style={{ flex: 1, minWidth: 220 }}>
+              <p style={{ color: '#e5e7eb', marginTop: 0, fontSize: 13 }}>
+                <strong>Card ID</strong>
+              </p>
+              <p
+                style={{
+                  color: '#9ca3af',
+                  fontSize: 12,
+                  wordBreak: 'break-all',
+                }}
+              >
+                <code>{cardId}</code>
+              </p>
+              
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button
+                  type="button"
+                  onClick={copyCardId}
+                  style={{
+                    ...buttonStyle,
+                    padding: '4px 10px',
+                    fontSize: 12,
+                    backgroundColor: '#1d4ed8',
+                  }}
+                >
+                  Copy card ID
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteVirtualCard}
+                  style={{
+                    ...buttonStyle,
+                    padding: '4px 10px',
+                    fontSize: 12,
+                    backgroundColor: '#4b5563',
+                  }}
+                >
+                  Delete card from this device
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginTop: 18, fontSize: 11, color: '#6b7280' }}>
+          <strong>How it fits your privacy story:</strong> tickets can be fully
+          anonymous (no card, no name), or optionally linked to a stable but
+          pseudonymous card ID. The system never forces you to reveal your real
+          identity just to travel.
         </div>
       </div>
     );
@@ -799,9 +1060,22 @@ function App() {
           >
             📷 Scan Ticket
           </button>
+          <button
+            onClick={() => setActiveTab('card')}
+            style={{
+              ...tabButtonStyle,
+              ...(activeTab === 'card' ? tabButtonActiveStyle : {}),
+            }}
+          >
+            💳 Virtual Card
+          </button>
         </div>
 
-        {activeTab === 'wallet' ? renderWallet() : renderScanner()}
+        {activeTab === 'wallet'
+          ? renderWallet()
+          : activeTab === 'scan'
+          ? renderScanner()
+          : renderCard()}
       </main>
 
       <footer style={footerStyle}>

@@ -37,10 +37,8 @@ function App() {
   async function verifyScannedPayload(scannedText) {
     if (!scannedText) return;
 
-    // ako smo već proverili isti QR i ništa se nije promenilo, nema potrebe da spamujemo backend
-    if (scannedText === rawPayload && status === 'valid') {
-      return;
-    }
+    // BITNO: više ne preskačemo verifikaciju kad je isti payload i status === 'valid'
+    // svaki scan šalje novi request, pa vidimo kad karta istekne
 
     setRawPayload(scannedText);
     setStatus('verifying');

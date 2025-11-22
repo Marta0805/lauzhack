@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     secret_key: str = Field(..., env="AETT_SECRET_KEY")
     # API key for trusted clients (wallet / conductor)
     api_key: str = Field(..., env="AETT_API_KEY")
-    # default ticket lifetime in minutes
+    # default ticket lifetime in minutes (koristi se za "single" i fallback)
     ticket_lifetime_minutes: int = Field(
-        120, env="AETT_TICKET_LIFETIME_MINUTES"
+        2, env="AETT_TICKET_LIFETIME_MINUTES"
     )
     # logical issuer name
     issuer: str = Field("aett-backend", env="AETT_ISSUER")
@@ -119,6 +119,9 @@ class TicketPayload(BaseModel):
     # optional personalization
     personalized_id: Optional[str] = None
 
+    # optional virtual card ID (pseudonymous, npr. CARD-...)
+    card_id: Optional[str] = None
+
     def expires_at_iso(self) -> str:
         return datetime.fromtimestamp(self.exp, tz=timezone.utc).isoformat()
 
@@ -179,6 +182,32 @@ def decode_and_verify(token: str) -> TicketPayload:
 
 
 # ---------------------------------------------------------------------------
+# Expiry logic per ticket type
+# ---------------------------------------------------------------------------
+
+def compute_expiry(now: datetime, ticket_type: str) -> datetime:
+    """
+    Odredi vreme isteka na osnovu tipa karte.
+      - single  -> 2 minuta (za testiranje konduktera)
+      - 2h      -> 2 sata
+      - day     -> 24h
+      - monthly -> 30 dana (demo)
+    """
+    if ticket_type == "single":
+        return now + timedelta(minutes=2)   # <-- OVDE fiksno 2 min
+
+    if ticket_type == "2h":
+        return now + timedelta(hours=2)
+    if ticket_type == "day":
+        return now + timedelta(days=1)
+    if ticket_type == "monthly":
+        return now + timedelta(days=30)
+
+    # fallback
+    return now + timedelta(minutes=2)
+
+
+# ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
 
@@ -189,6 +218,8 @@ class BuyRequest(BaseModel):
     origin: str
     destination: str
     personalized_id: Optional[str] = None
+    # opciono: pseudonimni ID virtuelne kartice sa uređaja
+    card_id: Optional[str] = None
 
 
 class BuyResponse(BaseModel):
@@ -200,6 +231,7 @@ class BuyResponse(BaseModel):
     destination: str
     chain: Optional[str] = None
     personalized_id: Optional[str] = None
+    card_id: Optional[str] = None
 
     # za UX: odmah znamo da karta još nije očitana
     first_checked_at: Optional[str] = None
@@ -217,6 +249,7 @@ class VerifyResponse(BaseModel):
     destination: Optional[str] = None
     chain: Optional[str] = None
     personalized_id: Optional[str] = None
+    card_id: Optional[str] = None
 
     # multi-scan info (3 voza, 3 konduktera)
     first_checked_at: Optional[str] = None
@@ -252,7 +285,7 @@ async def buy_ticket(req: BuyRequest):
     global LAST_CHAIN_HASH
 
     now = datetime.now(tz=timezone.utc)
-    exp = now + timedelta(minutes=settings.ticket_lifetime_minutes)
+    exp = compute_expiry(now, req.ticket_type)
 
     # --- "Cybertrack" hash-chain:
     # each ticket links to the previous ticket's hash using a HMAC-based hash
@@ -281,6 +314,7 @@ async def buy_ticket(req: BuyRequest):
         iss=settings.issuer,
         chain=chain_hash,
         personalized_id=req.personalized_id,
+        card_id=req.card_id,
     )
 
     token = encode_ticket(payload)
@@ -294,6 +328,7 @@ async def buy_ticket(req: BuyRequest):
         destination=req.destination,
         chain=chain_hash,
         personalized_id=req.personalized_id,
+        card_id=req.card_id,
         first_checked_at=None,
         already_checked=False,
     )
@@ -338,6 +373,7 @@ async def verify_ticket(token: str = Body(..., embed=True)):
         destination=payload.destination,
         chain=payload.chain,
         personalized_id=payload.personalized_id,
+        card_id=payload.card_id,
         first_checked_at=first_iso,
         already_checked=already,
     )
