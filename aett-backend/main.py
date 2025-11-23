@@ -295,7 +295,11 @@ async def buy_ticket(req: BuyRequest):
     global LAST_CHAIN_HASH
 
     now = datetime.now(tz=timezone.utc)
-    exp = now + timedelta(minutes=settings.ticket_lifetime_minutes)
+    if req.ticket_type == "single":
+        lifetime_minutes = 1          # single ističe posle 1 minut
+    else:
+        lifetime_minutes = settings.ticket_lifetime_minutes 
+    exp = now + timedelta(minutes=lifetime_minutes)
 
     # --- "Cybertrack" hash-chain:
     # each ticket links to the previous ticket's hash using a HMAC-based hash
